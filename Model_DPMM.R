@@ -10,7 +10,10 @@ library(condMVNorm)
 # set seed
 set.seed(123)
 
-dataset <- readRDS("sample_dataset.rds")
+dataset <- read.csv("sample_dataset.csv") %>%
+  mutate(drugclass = factor(drugclass),
+         npastdrug = factor(npastdrug),
+         ncurrentdrug = factor(ncurrentdrug))
 #standardise values
 mean_values <- vector(mode = "numeric", length = 6)
 sd_values <- vector(mode = "numeric", length = 6)
