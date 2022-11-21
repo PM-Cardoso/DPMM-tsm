@@ -6,6 +6,8 @@ library(modelr)
 library(abind)
 library(coda)
 library(condMVNorm)
+library(ggplot2)
+library(cowplot)
 
 # set seed
 set.seed(123)
@@ -19,14 +21,15 @@ mean_values <- vector(mode = "numeric", length = 6)
 sd_values <- vector(mode = "numeric", length = 6)
 
 for (i in 1:6) {
-  mean_values[i] <- mean(dataset[, i])
-  sd_values[i] <- sd(dataset[, i])
+  mean_values[i] <- mean(dataset[,i])
+  sd_values[i] <- sd(dataset[,i])
 }
 
 names(mean_values) <- colnames(dataset[,c(1:6)])
 names(sd_values) <- colnames(dataset[,c(1:6)])
 
 standardisation <- list(mean_values, sd_values)
+
 
 for (i in 1:6) {
   # first we take away the mean of the variable
@@ -54,8 +57,8 @@ calc_parms <- function(dataset, nk = 3) {
   colnames(dataset) <- paste0("rcs_", colnames(dataset))
   return(list(dataset = dataset, knots = parms))
 }
-## convert to splines and extract knots
-temp <- calc_parms(select(y_original, prehba1cmmol, egfr_ckdepi, prealtlog, prebmi, agetx, hba1cmonth))
+temp <- calc_parms(select(y_original, prehba1cmmol, egfr_ckdepi, 
+                          prealtlog, prebmi, agetx, hba1cmonth))
 y_original <- cbind(y_original, temp$dataset)
 knots <- temp$knots
 rm(temp)
@@ -76,7 +79,7 @@ consts <- list(
   ndiscdim = ndiscdim      # number of categories
 )
 
-# calculating the range of values in continuous variables, DPMM prior
+# initial values for the DPMM
 cont_vars <- dataset[, c("prehba1cmmol", "egfr_ckdepi", "prealtlog",
                          "prebmi", "agetx", "hba1cmonth")] %>%
   as.matrix()
@@ -359,10 +362,11 @@ postPhi <- samples %>%
 
 # Combine posterior samples with the individual's values
 dataset <- readRDS("sample_dataset.rds")
-patient <- dataset[1,-1]
+current.patient <- dataset[1,-1]
 # missing values
-patient[,c(2,8)] <- NA
+current.patient[,c(2,8)] <- NA
 # turn categorical variables into category entry
+patient <- current.patient
 patient[,c(7,8,9)] <- as.numeric(patient[,c(7,8,9)] )
 # we standardise the existing continuous variables
 var_names <- colnames(patient)[c(1,3,4,5)]
@@ -493,5 +497,159 @@ var <- "egfr_ckdepi"
 predictions[,var] <- predictions[,var] * standardisation[[2]][var]
 # Second we add the mean
 predictions[,var] <- predictions[,var] + standardisation[[1]][var]
+
+# Plot for predictions of categorical missing value
+cat_values <- data.frame(predictions$npastdrug, 
+                         as.numeric(dataset[1,"npastdrug"])) %>%
+  set_names(c("prediction", "true_values")) %>%
+  mutate(colour = ifelse(prediction == true_values, "Correct", "Wrong")) %>%
+  mutate(colour = factor(colour)) %>%
+  count(prediction) %>%
+  mutate(perc = n / nrow(predictions)) %>%
+  ggplot(aes(x = prediction, y = perc)) +
+  geom_bar(stat = "identity") +
+  theme(
+    # axis.title.y = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(x = "Number of Previous Drugs", y = "mass function (%)") +
+  ylim(0, 1) +
+  scale_x_continuous(breaks=c(1,2,3,4),
+                     labels=c("2", "3", "4", "5"))
+
+# Plot for predictions of continuous missing value
+cont_values <- data.frame(predictions$egfr_ckdepi) %>%
+  set_names(c("predictions")) %>%
+  ggplot() +
+  geom_density(aes(x = predictions, fill = "blue")) +
+  geom_vline(aes(xintercept = dataset[1,"egfr_ckdepi"], 
+                 fill = "black"), size = 1) +
+  labs(fill = "", y = "", x = "eGFR") +
+  scale_fill_manual(values = c("black","#9198a3"), 
+                    labels = c("True value", "Prediction")) +
+  theme(
+    legend.position = "bottom",
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+plot_grid(cat_values, cont_values, ncol = 2, nrow = 1)
+
+# function for calculating spline values
+spline_values <- function(x, parms) {
+  c(rcspline.eval(x, parms), recursive=TRUE)
+}
+
+
+# Gather the posterior distributions for Beta values
+PostB <- samples %>%
+  select(starts_with("beta"))
+
+# Create a matrix of possible patient values
+patient.for.predictions <- dataset[1,-1] %>%
+  mutate(egfr_ckdepi = NA,
+         npastdrug = NA)
+patient_matrix <- as.data.frame(lapply(patient.for.predictions, rep, nrow(samples)))
+
+# add predictions of missing values into the matrix
+patient_matrix[,colnames(predictions)] <- predictions
+
+# format variables
+patient_matrix <- patient_matrix %>%
+  mutate(egfr_ckdepi = as.numeric(egfr_ckdepi),
+         npastdrug = factor(npastdrug, 
+                            levels = c("1","2","3","4"), 
+                            labels = levels(dataset$npastdrug)))
+
+# standardise values
+for (i in c("prehba1cmmol", "egfr_ckdepi", "prealtlog", "prebmi", "agetx" )) {
+  # first we take away the mean of the variable
+  patient_matrix[,i] <- patient_matrix[,i] - standardisation[[1]][i]
+  # second we divide by the standard deviation
+  patient_matrix[,i] <- patient_matrix[,i] / standardisation[[2]][i]
+}
+
+# Turn patient values into the model form
+patient_matrix <- model_matrix(patient_matrix, ~ prehba1cmmol + 
+                                 egfr_ckdepi +
+                                 prealtlog +
+                                 prebmi+
+                                 agetx +
+                                 hba1cmonth +
+                                 drugclass +
+                                 npastdrug +
+                                 ncurrentdrug)
+
+# create new columns for interations
+patient_matrix <- patient_matrix %>%
+  mutate(`drugclass:prehba1cmmol` = patient_matrix$prehba1cmmol * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:egfr_ckdepi` = patient_matrix$egfr_ckdepi * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:prealtlog` = patient_matrix$prealtlog * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:prebmi` = patient_matrix$prebmi * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:agetx` = patient_matrix$agetx * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:rcs_prehba1cmmol` = (spline_values(patient_matrix$prehba1cmmol, 
+                                                       knots[,1])) *
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:rcs_egfr_ckdepi` = (spline_values(patient_matrix$egfr_ckdepi, 
+                                                      knots[,2])) *
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:rcs_prealtlog` = (spline_values(patient_matrix$prealtlog, 
+                                                    knots[,3])) *
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:rcs_prebmi` = (spline_values(patient_matrix$prebmi, 
+                                                 knots[,4])) * 
+           patient_matrix$drugclassSGLT2i,
+         
+         `drugclass:rcs_agetx` = (spline_values(patient_matrix$agetx, 
+                                                knots[,5])) * 
+           patient_matrix$drugclassSGLT2i,
+         
+         rcs_prehba1cmmol = spline_values(patient_matrix$prehba1cmmol, 
+                                          knots[,1]),
+         rcs_egfr_ckdepi = spline_values(patient_matrix$egfr_ckdepi,
+                                         knots[,2]),
+         rcs_prealtlog = spline_values(patient_matrix$prealtlog, 
+                                       knots[,3]),
+         rcs_prebmi = spline_values(patient_matrix$prebmi, 
+                                    knots[,4]),
+         rcs_agetx = spline_values(patient_matrix$agetx, 
+                                   knots[,5]),
+         rcs_hba1cmonth = spline_values(patient_matrix$hba1cmonth, 
+                                        knots[,6]))
+
+# calculate outcome predictions
+patient.predictions <- rowSums(patient_matrix*PostB)
+
+# Remove standardisation
+values <- (patient.predictions * standardisation[[2]]["posthba1c_final"]) + 
+  standardisation[[1]]["posthba1c_final"]
+
+# Plot values
+ggplot() +
+  geom_density(aes(x = values, fill = "blue")) +
+  geom_vline(aes(xintercept = dataset[1, "posthba1c_final"], 
+                 fill = "black"), size = 1) +
+  labs(fill = "", y = "", x = "Response") +
+  scale_fill_manual(values = c("black","#9198a3"), 
+                    labels = c("True value", "Prediction")) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_blank()
+  )
+
 
 
