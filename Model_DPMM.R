@@ -6,23 +6,29 @@ library(modelr)
 library(abind)
 library(coda)
 library(condMVNorm)
-library(ggplot2)
-library(cowplot)
+
+# functions needed to convert to splines
+spline_values <- function(x, parms) {
+  c(rcspline.eval(x, parms), recursive=TRUE)
+}
+calc_spline_vals <- nimbleRcall(function(x = double(1), parms = double(1)){}, Rfun = 'spline_values',
+                                returnType = double(1))
 
 # set seed
 set.seed(123)
 
-dataset <- read.csv("sample_dataset.csv") %>%
-  mutate(drugclass = factor(drugclass),
-         npastdrug = factor(npastdrug),
-         ncurrentdrug = factor(ncurrentdrug))
+dataset <- readRDS("sample_dataset.rds")
+
+## add missing data
+dataset$prehba1cmmol[1:2] <- NA
+
 #standardise values
 mean_values <- vector(mode = "numeric", length = 6)
 sd_values <- vector(mode = "numeric", length = 6)
 
 for (i in 1:6) {
-  mean_values[i] <- mean(dataset[,i])
-  sd_values[i] <- sd(dataset[,i])
+  mean_values[i] <- mean(dataset[, i], na.rm = TRUE)
+  sd_values[i] <- sd(dataset[, i], na.rm = TRUE)
 }
 
 names(mean_values) <- colnames(dataset[,c(1:6)])
@@ -30,20 +36,26 @@ names(sd_values) <- colnames(dataset[,c(1:6)])
 
 standardisation <- list(mean_values, sd_values)
 
-
 for (i in 1:6) {
   # first we take away the mean of the variable
   dataset[,i] <- dataset[,i]-standardisation[[1]][i]
   # second we divide by the standard deviation
   dataset[,i] <- dataset[,i] / standardisation[[2]][i]
 }
-# generate discrete latent variables
+# generate discrete latent variables (na.action makes it so NA values are included)
+
+current.na.action <- options('na.action')
+options(na.action='na.pass')
+
 y_original <- dataset %>%
   mutate(Intercept = 0) %>%
   model_matrix(Intercept ~ posthba1c_final + 
                  drugclass + npastdrug + ncurrentdrug +
                  prehba1cmmol + egfr_ckdepi + prealtlog + prebmi + agetx + hba1cmonth) %>%
   select(-"(Intercept)")
+
+options(na.action=current.na.action)
+
 # function to calculate splines and knots
 calc_parms <- function(dataset, nk = 3) {
   if(nk != 3) stop("Only works for nk = 3 currently")
@@ -57,8 +69,8 @@ calc_parms <- function(dataset, nk = 3) {
   colnames(dataset) <- paste0("rcs_", colnames(dataset))
   return(list(dataset = dataset, knots = parms))
 }
-temp <- calc_parms(select(y_original, prehba1cmmol, egfr_ckdepi, 
-                          prealtlog, prebmi, agetx, hba1cmonth))
+## convert to splines and extract knots
+temp <- calc_parms(select(y_original, prehba1cmmol, egfr_ckdepi, prealtlog, prebmi, agetx, hba1cmonth))
 y_original <- cbind(y_original, temp$dataset)
 knots <- temp$knots
 rm(temp)
@@ -68,19 +80,28 @@ cat_vars <- dataset[,c("drugclass","npastdrug","ncurrentdrug")] %>%
   as.matrix()
 ndiscdim = as.vector(apply(cat_vars, 2, function(x) length(unique(x))))
 
+# separate complete and incomplete datasets
+dataset_complete <- y_original[complete.cases(y_original[,-c(1)]),]
+
+dataset_incomplete <- y_original[!complete.cases(y_original[,-c(1)]),]
+
+
+
 # constants for nimble model
 consts <- list(
-  N = nrow(y_original),    # iterated through all patients
-  ndim = 6,                # number of continuous variables
-  ndisc = 7,               # number of categorical latent variables
-  nint = 5,                # number of interactions
-  ndisc_numeric = 3,       # number of starting categorical variables
-  L = 5,                   # number of components in DPMM
-  ndiscdim = ndiscdim      # number of categories
+  N = nrow(dataset_complete),       # iterated through all patients with complete data
+  Nmiss = nrow(dataset_incomplete), # iterated through all patients with incomplete data
+  ndim = 6,                         # number of continuous variables
+  ndisc = 7,                        # number of categorical latent variables
+  nint = 5,                         # number of interactions
+  ndisc_numeric = 3,                # number of starting categorical variables
+  L = 5,                            # number of components in DPMM
+  ndiscdim = ndiscdim,              # number of categories
+  parms = knots
 )
 
-# initial values for the DPMM
-cont_vars <- dataset[, c("prehba1cmmol", "egfr_ckdepi", "prealtlog",
+# calculating the range of values in continuous variables, DPMM prior
+cont_vars <- dataset_complete[, c("prehba1cmmol", "egfr_ckdepi", "prealtlog",
                          "prebmi", "agetx", "hba1cmonth")] %>%
   as.matrix()
 mu0 = apply(cont_vars, 2, mean)
@@ -92,16 +113,29 @@ delta = matrix(rep(1, consts$ndisc_numeric * max(consts$ndiscdim)),
                nrow = consts$ndisc_numeric)
 
 data <- list(
+  ## complete data
   # response
-  y = y_original[,1],
+  y = dataset_complete[,1],
   # continuous variables
-  x_cont = as.matrix(y_original[,9:14]),
+  x_cont = as.matrix(dataset_complete[,9:14]),
   # discrete variables using latent variables for regression
-  x_disc = as.matrix(y_original[,2:8]),
+  x_disc = as.matrix(dataset_complete[,2:8]),
   # spline of continuous variables
-  x_spline = as.matrix(y_original[,15:20]),
+  x_spline = as.matrix(dataset_complete[,15:20]),
   # original discrete variables
-  x_orig_disc = sapply(dataset[,c(8,9,10)], function(x) as.numeric(x)), 
+  x_orig_disc = sapply(dataset[complete.cases(y_original[,-c(1)]),c(8,9,10)], function(x) as.numeric(x)), 
+  ## incomplete data
+  # response
+  ymiss = dataset_incomplete[,1],
+  # continuous variables
+  x_cont_miss = as.matrix(dataset_incomplete[,9:14]),
+  # discrete variables using latent variables for regression
+  x_disc_miss = as.matrix(dataset_incomplete[,2:8]),
+  # spline of continuous variables
+  x_spline_miss = as.matrix(dataset_incomplete[,15:20]),
+  # original discrete variables
+  x_orig_disc_miss = sapply(dataset[!complete.cases(y_original[,-c(1)]),c(8,9,10)], function(x) as.numeric(x)), 
+  # response
   # initial values for DPMM priors
   mu0 = mu0,       # initial mu values
   tau0 = tau0,     # initial tau values
@@ -133,6 +167,32 @@ code <- nimbleCode({
                    beta_int_spline[2] * x_disc[i,1] * x_spline[i,2] + beta_int_spline[3] * x_disc[i,1] * x_spline[i,3] +
                    beta_int_spline[4] * x_disc[i,1] * x_spline[i,4] + beta_int_spline[5] * x_disc[i,1] * x_spline[i,5] , sd = sigma)
   }
+  for(i in 1:Nmiss) {
+    ## DPMM for continuous
+    zmiss[i] ~ dcat(w[1:L])
+    x_cont_miss[i, ] ~ dmnorm(muL[zmiss[i], ], prec = tauL[, , zmiss[i]])
+    ## DPMM for discrete
+    for (j in 1:ndisc_numeric) {
+      x_orig_disc_miss[i, j] ~ dcat(phiL[j, 1:ndiscdim[j], z[i]])
+    }
+    ## Regression
+    ymiss[i] ~ dnorm(beta0 +
+                   inprod(beta_disc[1:ndisc], x_disc_miss[i, 1:ndisc]) + # betas for discrete vars 
+                   inprod(beta_cont[1:ndim], x_cont_miss[i,1:ndim]) + # betas for continuous vars
+                   inprod(beta_rcs[1:ndim], x_spline_miss[i, 1:ndim]) + # betas for spline vars
+                   # betas for interactions between drugclass and spline/continuous variables
+                   beta_int_cont[1] * x_disc_miss[i,1] * x_cont_miss[i,1] + beta_int_cont[2] * x_disc_miss[i,1] * x_cont_miss[i,2] + 
+                   beta_int_cont[3] * x_disc_miss[i,1] * x_cont_miss[i,3] + beta_int_cont[4] * x_disc_miss[i,1] * x_cont_miss[i,4] +
+                   beta_int_cont[5] * x_disc_miss[i,1] * x_cont_miss[i,5] + beta_int_spline[1] * x_disc_miss[i,1] * x_spline_miss[i,1] +
+                   beta_int_spline[2] * x_disc_miss[i,1] * x_spline_miss[i,2] + beta_int_spline[3] * x_disc_miss[i,1] * x_spline_miss[i,3] +
+                   beta_int_spline[4] * x_disc_miss[i,1] * x_spline_miss[i,4] + beta_int_spline[5] * x_disc_miss[i,1] * x_spline_miss[i,5] , sd = sigma)
+  }
+  for(j in 1:ndim) {
+    x_spline_miss[1:Nmiss, j] <- calc_spline_vals(x_cont_miss[1:Nmiss,j], parms[,j]) # calculates spline values for each var, all at the same time
+  }
+  
+  
+  
   ## priors for regression
   beta0 ~ dnorm(0, sd = 2.5) # intercept
   for (k in 1:ndisc) {
@@ -169,7 +229,7 @@ code <- nimbleCode({
   }
 })
 # sample initial values
-initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim) {
+initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim, Nmiss, ymiss, x_cont_miss, x_disc_miss, x_spline_miss) {
   # regression stuff
   beta0 = rnorm(1, 0, 2.5)
   beta_disc = rep(rnorm(ndisc, 0, 2.5))
@@ -187,6 +247,7 @@ initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim) {
   }
   w <- c(w, prod(1 - v))
   z <- rcat(N, w)
+  zmiss <- rcat(Nmiss, w)
   # DPMM for discrete
   phiL <- map(1:L, function(i, ndiscdim, m, L) {
     p <- map(ndiscdim, function(n, m, L) {
@@ -208,6 +269,20 @@ initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim) {
   }
   muL <- mvrnorm(L, mu0, tau0)
   tauL <- rWishart(L, rho1, R1)
+  
+  ymiss1 <- ymiss
+  ymiss1[!is.na(ymiss)] <- NA
+  ymiss1[is.na(ymiss)] <- 0
+  x_cont_miss1 <- x_cont_miss
+  x_cont_miss1[!is.na(x_cont_miss)] <- NA
+  x_cont_miss1[is.na(x_cont_miss)] <- 0
+  x_disc_miss1 <- x_disc_miss
+  x_disc_miss1[!is.na(x_disc_miss)] <- NA
+  x_disc_miss1[is.na(x_disc_miss)] <- 0
+  x_spline_miss1 <- x_spline_miss
+  x_spline_miss1[!is.na(x_spline_miss)] <- NA
+  x_spline_miss1[is.na(x_spline_miss)] <- 0
+  
   inits <- list(
     beta0 = beta0,
     beta_disc = beta_disc,
@@ -220,11 +295,16 @@ initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim) {
     v = v,
     w = w,
     z = z,
+    zmiss = zmiss,
     R1 = R1,
     rho1 = rho1,
     muL = muL,
     tauL = tauL,
-    phiL = phiL
+    phiL = phiL,
+    ymiss = ymiss1,
+    x_cont_miss = x_cont_miss1,
+    x_disc_miss = x_disc_miss1,
+    x_spline_miss = x_spline_miss1
   )
   inits
 }
@@ -235,7 +315,8 @@ model <- nimbleModel(
   data = data,
   inits = initFn(consts$ndisc, consts$ndim, consts$nint, 
                  data$y, consts$L, consts$N, data$mu0, 
-                 data$tau0, data$R0, data$rho0, consts$ndiscdim)
+                 data$tau0, data$R0, data$rho0, consts$ndiscdim,
+                 consts$Nmiss, data$ymiss, data$x_cont_miss, data$x_disc_miss, data$x_spline_miss)
 )
 # compile the model
 cmodel <- compileNimble(model)
@@ -244,7 +325,7 @@ config <- configureMCMC(cmodel,
                         monitors = c("muL", "tauL", "v", "alpha","z",
                                      "beta0", "beta_disc", "beta_cont", "beta_rcs", 
                                      "beta_int_cont", "beta_int_spline",
-                                     "sigma", "phiL"), thin = 1)
+                                     "sigma", "phiL", "x_cont_miss"), thin = 1)
 # build the model
 built <- buildMCMC(config)
 # compile model
@@ -362,11 +443,10 @@ postPhi <- samples %>%
 
 # Combine posterior samples with the individual's values
 dataset <- readRDS("sample_dataset.rds")
-current.patient <- dataset[1,-1]
+patient <- dataset[1,-1]
 # missing values
-current.patient[,c(2,8)] <- NA
+patient[,c(2,8)] <- NA
 # turn categorical variables into category entry
-patient <- current.patient
 patient[,c(7,8,9)] <- as.numeric(patient[,c(7,8,9)] )
 # we standardise the existing continuous variables
 var_names <- colnames(patient)[c(1,3,4,5)]
@@ -497,6 +577,7 @@ var <- "egfr_ckdepi"
 predictions[,var] <- predictions[,var] * standardisation[[2]][var]
 # Second we add the mean
 predictions[,var] <- predictions[,var] + standardisation[[1]][var]
+
 
 # Plot for predictions of categorical missing value
 cat_values <- data.frame(predictions$npastdrug, 
@@ -650,6 +731,8 @@ ggplot() +
     legend.position = "bottom",
     axis.text.y = element_blank()
   )
+
+
 
 
 
