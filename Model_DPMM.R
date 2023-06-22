@@ -173,7 +173,7 @@ code <- nimbleCode({
     x_cont_miss[i, ] ~ dmnorm(muL[zmiss[i], ], prec = tauL[, , zmiss[i]])
     ## DPMM for discrete
     for (j in 1:ndisc_numeric) {
-      x_orig_disc_miss[i, j] ~ dcat(phiL[j, 1:ndiscdim[j], z[i]])
+      x_orig_disc_miss[i, j] ~ dcat(phiL[j, 1:ndiscdim[j], zmiss[i]])
     }
     ## Regression
     ymiss[i] ~ dnorm(beta0 +
