@@ -14,6 +14,10 @@ spline_values <- function(x, parms) {
 calc_spline_vals <- nimbleRcall(function(x = double(1), parms = double(1)){}, Rfun = 'spline_values',
                                 returnType = double(1))
 
+# source custom RW
+source("conditional_RW.R")
+source("conditional_RW_block.R")
+
 # set seed
 set.seed(123)
 
@@ -326,6 +330,26 @@ config <- configureMCMC(cmodel,
                                      "beta0", "beta_disc", "beta_cont", "beta_rcs", 
                                      "beta_int_cont", "beta_int_spline",
                                      "sigma", "phiL", "x_cont_miss"), thin = 1)
+
+## add custom sampler
+config$removeSampler("x_cont_miss")
+for(i in 1:nrow(data$x_cont_miss)) {
+  if(sum(is.na(data$x_cont_miss[i, ])) == 1) {
+    config$addSampler(
+      target = paste0("x_cont_miss[", i, ", 1:", ncol(data$x_cont_miss), "]"),
+      type = 'conditional_RW',
+      control = list(scale = 1, index = which(is.na(data$x_cont_miss[i, ])), adapt = TRUE)
+    )
+  } else {
+    config$addSampler(
+      target = paste0("x_cont_miss[", i, ", 1:", ncol(data$x_cont_miss), "]"),
+      type = 'conditional_RW_block',
+      control = list(scale = 1, indices = which(is.na(data$x_cont_miss[i, ])), adapt = TRUE)
+    )
+  }
+}
+
+                       
 # build the model
 built <- buildMCMC(config)
 # compile model
