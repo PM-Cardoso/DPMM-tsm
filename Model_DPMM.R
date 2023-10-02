@@ -1,11 +1,13 @@
+library(xfun)
+library(cowplot)
 library(MASS)
 library(nimble)
-library(tidyverse)
 library(rms)
 library(modelr)
 library(abind)
 library(coda)
 library(condMVNorm)
+library(tidyverse)
 
 # functions needed to convert to splines
 spline_values <- function(x, parms) {
@@ -21,7 +23,11 @@ source("conditional_RW_block.R")
 # set seed
 set.seed(123)
 
-dataset <- readRDS("sample_dataset.rds")
+
+dataset <- read.csv("sample_dataset.csv") %>%
+  mutate(drugclass = factor(drugclass),
+         npastdrug = factor(npastdrug),
+         ncurrentdrug = factor(ncurrentdrug))
 
 ## add missing data
 dataset$prehba1cmmol[1:2] <- NA
@@ -191,10 +197,8 @@ code <- nimbleCode({
                    beta_int_spline[2] * x_disc_miss[i,1] * x_spline_miss[i,2] + beta_int_spline[3] * x_disc_miss[i,1] * x_spline_miss[i,3] +
                    beta_int_spline[4] * x_disc_miss[i,1] * x_spline_miss[i,4] + beta_int_spline[5] * x_disc_miss[i,1] * x_spline_miss[i,5] , sd = sigma)
   }
-  for(j in 1:ndim) {
-    x_spline_miss[1:Nmiss, j] <- calc_spline_vals(x_cont_miss[1:Nmiss,j], parms[,j]) # calculates spline values for each var, all at the same time
-  }
   
+  x_spline_miss[1:Nmiss, 1] <- calc_spline_vals(x_cont_miss[1:Nmiss,1], parms[,1])
   
   
   ## priors for regression
@@ -466,7 +470,10 @@ postPhi <- samples %>%
   rename(phiL = data)
 
 # Combine posterior samples with the individual's values
-dataset <- readRDS("sample_dataset.rds")
+dataset <- read.csv("sample_dataset.csv") %>%
+  mutate(drugclass = factor(drugclass),
+         npastdrug = factor(npastdrug),
+         ncurrentdrug = factor(ncurrentdrug))
 patient <- dataset[1,-1]
 # missing values
 patient[,c(2,8)] <- NA
@@ -675,16 +682,22 @@ for (i in c("prehba1cmmol", "egfr_ckdepi", "prealtlog", "prebmi", "agetx" )) {
   patient_matrix[,i] <- patient_matrix[,i] / standardisation[[2]][i]
 }
 
+library(hardhat)
+
 # Turn patient values into the model form
-patient_matrix <- model_matrix(patient_matrix, ~ prehba1cmmol + 
-                                 egfr_ckdepi +
-                                 prealtlog +
-                                 prebmi+
-                                 agetx +
-                                 hba1cmonth +
-                                 drugclass +
-                                 npastdrug +
-                                 ncurrentdrug)
+frame <- patient_matrix %>%
+  mutate(Intercept = 1) %>%
+  hardhat::model_frame(formula = Intercept ~ prehba1cmmol + 
+                         egfr_ckdepi +
+                         prealtlog +
+                         prebmi+
+                         agetx +
+                         hba1cmonth +
+                         drugclass +
+                         npastdrug +
+                         ncurrentdrug)
+patient_matrix <- hardhat::model_matrix(frame$terms, frame$data)
+
 
 # create new columns for interations
 patient_matrix <- patient_matrix %>%
