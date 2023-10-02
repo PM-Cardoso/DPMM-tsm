@@ -1,3 +1,7 @@
+## custom MCMC sampler (adapted from 'sampler_RW_block') here
+## https://github.com/nimble-dev/nimble/blob/devel/packages/nimble/R/MCMC_samplers.R
+## any introduced errors are our own
+
 sampler_conditional_RW_block <- nimbleFunction(
     name = 'sampler_conditional_RW_block',
     contains = sampler_BASE,
@@ -26,7 +30,6 @@ sampler_conditional_RW_block <- nimbleFunction(
         for(i in 1:length(indices)) {
             if(indices[i] < 1 | indices[i] > d) stop('indices must be within number of dimensions of target')
         }
-        
         ## node list generation
         #targetAsScalar <- model$expandNodeNames(target, returnScalarComponents = TRUE)
         calcNodes <- model$getDependencies(target)

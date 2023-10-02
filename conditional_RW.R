@@ -1,4 +1,7 @@
-## custom MCMC sampler
+## custom MCMC sampler (adapted from 'sampler_RW') here
+## https://github.com/nimble-dev/nimble/blob/devel/packages/nimble/R/MCMC_samplers.R
+## any introduced errors are our own
+
 sampler_conditional_RW <- nimbleFunction(
     name = 'sampler_conditional_RW',
     contains = sampler_BASE,    
