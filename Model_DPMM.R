@@ -16,6 +16,19 @@ spline_values <- function(x, parms) {
 calc_spline_vals <- nimbleRcall(function(x = double(1), parms = double(1)){}, Rfun = 'spline_values',
                                 returnType = double(1))
 
+# function needs for estimating log-probability-density
+sumLogPostDens <- nimbleFunction(
+  name = 'sumLogPostDens',
+  contains = sampler_BASE,
+  setup = function(model, mvSaved, target, control) {
+    stochNodes <- setdiff(model$getNodeNames(stochOnly = TRUE), target)
+  },
+  run = function() {
+    model[[target]] <<- model$getLogProb(stochNodes)
+  },
+  methods = list( reset = function() {} )
+)
+
 # source custom RW
 source("conditional_RW.R")
 source("conditional_RW_block.R")
@@ -235,6 +248,9 @@ code <- nimbleCode({
       phiL[j, 1:ndiscdim[j], i] ~ ddirch(delta[j, 1:ndiscdim[j]])
     }
   }
+  
+  #log-probability-density
+  logDens ~ dnorm(0, 1)    ## this distribution does not matter
 })
 # sample initial values
 initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim, Nmiss, ymiss, x_cont_miss, x_disc_miss, x_spline_miss) {
@@ -312,7 +328,8 @@ initFn <- function(ndisc, ndim, nint, y, L, N, mu0, tau0, R0, rho0, ndiscdim, Nm
     ymiss = ymiss1,
     x_cont_miss = x_cont_miss1,
     x_disc_miss = x_disc_miss1,
-    x_spline_miss = x_spline_miss1
+    x_spline_miss = x_spline_miss1,
+    logDens = 0
   )
   inits
 }
@@ -333,7 +350,7 @@ config <- configureMCMC(cmodel,
                         monitors = c("muL", "tauL", "v", "alpha","z",
                                      "beta0", "beta_disc", "beta_cont", "beta_rcs", 
                                      "beta_int_cont", "beta_int_spline",
-                                     "sigma", "phiL", "x_cont_miss"), thin = 1)
+                                     "sigma", "phiL", "x_cont_miss", "logDens"), thin = 1)
 
 ## add custom sampler
 config$removeSampler("x_cont_miss")
@@ -353,6 +370,10 @@ for(i in 1:nrow(data$x_cont_miss)) {
   }
 }
 
+## remove sampler assigned to 'logDens'
+config$removeSamplers('logDens')
+## add our custom sampler
+config$addSampler(target = 'logDens', type = 'sumLogPostDens')   
                        
 # build the model
 built <- buildMCMC(config)
@@ -374,7 +395,11 @@ samples <- as.matrix(cbuilt$mvSamples) %>%
 ## Making predictions for an individual
 
 # Remove any samples that constitute burn-in.
+## Alpha
 samples %>% select("alpha") %>% as.mcmc() %>% plot()
+
+## Log-probability-density
+samples %>% select("logDens") %>% as.mcmc() %>% plot()
 
 samples <- samples %>% slice(-c(1:5000))
 
