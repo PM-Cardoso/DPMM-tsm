@@ -6,4 +6,4 @@ Paper:
 Cardoso P, Dennis J, Bowden J, Shields B, McKinley T. Dirichlet process mixture models to estimate outcomes for individuals with missing predictor data: application to predict optimal type 2 diabetes therapy. *Pre-print: medRxiv*. https://www.medrxiv.org/content/10.1101/2022.07.26.22278066v1
 
 Package:
-DPMM R package https://github.com/PM-Cardoso/DPMM
+DPMM is an R package providing a library of model fitting functions, diagnostics tools for the fitted model and plotting functions. https://github.com/PM-Cardoso/DPMM
